@@ -1,0 +1,9 @@
+adapter
+base_model
+data
+gguf
+merged_model
+unsloth_compiled_cache
+QLoRA.iml
+.idea
+
