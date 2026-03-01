@@ -4,7 +4,11 @@ set -euo pipefail
 INPUT_GGUF="gguf/model.f16.gguf"
 OUTPUT_GGUF="gguf/model.Q4_K_M.gguf"
 QUANT="Q4_K_M"
-QUANTIZE_BIN="../llama.cpp/build/bin/llama-quantize"
+if [[ -x "../llama.cpp/build/bin/llama-quantize" ]]; then
+  QUANTIZE_BIN="../llama.cpp/build/bin/llama-quantize"
+else
+  QUANTIZE_BIN="./llama.cpp/build/bin/llama-quantize"
+fi
 
 usage() {
   cat <<'EOF'
@@ -14,7 +18,7 @@ Options:
   --input PATH         Source GGUF file (default: gguf/model.f16.gguf)
   --output PATH        Quantized GGUF file (default: gguf/model.Q4_K_M.gguf)
   --quant TYPE         Quantization type (default: Q4_K_M)
-  --quantize-bin PATH  Path to llama-quantize binary (default: ./llama.cpp/build/bin/llama-quantize)
+  --quantize-bin PATH  Path to llama-quantize binary (default: ../llama.cpp/build/bin/llama-quantize if exists, else ./llama.cpp/build/bin/llama-quantize)
   -h, --help           Show this help
 EOF
 }
@@ -50,4 +54,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$(dirname "$OUTPUT_GGUF")"
+QUANTIZE_DIR="$(dirname "$QUANTIZE_BIN")"
+export LD_LIBRARY_PATH="$QUANTIZE_DIR:${LD_LIBRARY_PATH:-}"
 "$QUANTIZE_BIN" "$INPUT_GGUF" "$OUTPUT_GGUF" "$QUANT"

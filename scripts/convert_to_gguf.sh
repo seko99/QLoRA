@@ -14,7 +14,7 @@ Options:
   --input-dir PATH     HF merged model directory (default: merged_model)
   --outtype TYPE       GGUF outtype, e.g. f16/f32/bf16 (default: f16)
   --outfile PATH       Output GGUF file (default: gguf/model.f16.gguf)
-  --converter PATH     Path to convert_hf_to_gguf.py (default: llama.cpp/convert_hf_to_gguf.py)
+  --converter PATH     Path to convert_hf_to_gguf.py (default: ../llama.cpp/convert_hf_to_gguf.py)
   -h, --help           Show this help
 EOF
 }
