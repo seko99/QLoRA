@@ -15,10 +15,36 @@ try:
 except Exception:  # noqa: BLE001
     faiss = None
 
+try:
+    import readline  # type: ignore
+except Exception:  # noqa: BLE001
+    readline = None
+
+try:
+    from prompt_toolkit import PromptSession  # type: ignore
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory  # type: ignore
+    from prompt_toolkit.completion import WordCompleter  # type: ignore
+    from prompt_toolkit.history import FileHistory  # type: ignore
+except Exception:  # noqa: BLE001
+    PromptSession = None
+    FileHistory = None
+    WordCompleter = None
+    AutoSuggestFromHistory = None
+
+try:
+    from rich.console import Console  # type: ignore
+    from rich.panel import Panel  # type: ignore
+    from rich.table import Table  # type: ignore
+except Exception:  # noqa: BLE001
+    Console = None
+    Panel = None
+    Table = None
+
 
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_API_KEY = "lm-studio"
 DEFAULT_MODEL = "model-identifier"
+CHAT_COMMANDS = ["/exit", "/reset", "/save"]
 
 
 @dataclass
@@ -251,12 +277,28 @@ def retrieve(
 
 
 def build_prompt(question: str, retrieved: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
+    return build_prompt_with_memory(question, retrieved, history_turns=[])
+
+
+def build_prompt_with_memory(
+    question: str,
+    retrieved: Sequence[Dict[str, Any]],
+    history_turns: Sequence[Dict[str, str]],
+) -> List[Dict[str, str]]:
     context_blocks = []
     for i, item in enumerate(retrieved, start=1):
         context_blocks.append(
             f"Источник {i}: {item['file_name']} | Раздел: {item['section']}\n"
             f"Текст:\n{item['text']}"
         )
+
+    history_blocks: List[str] = []
+    for i, turn in enumerate(history_turns, start=1):
+        uq = str(turn.get("user", "")).strip()
+        aa = str(turn.get("assistant", "")).strip()
+        if not uq and not aa:
+            continue
+        history_blocks.append(f"Ход {i}:\nПользователь: {uq}\nАссистент: {aa}")
 
     system = (
         "Ты производственный ассистент. Отвечай только по предоставленному контексту документов. "
@@ -267,6 +309,13 @@ def build_prompt(question: str, retrieved: Sequence[Dict[str, Any]]) -> List[Dic
     )
     user = (
         f"Вопрос: {question}\n\n"
+        + (
+            "Предыдущие ходы диалога:\n"
+            f"{chr(10).join(history_blocks)}\n\n"
+            if history_blocks
+            else ""
+        )
+        +
         "Контекст:\n"
         f"{'\n\n'.join(context_blocks)}\n\n"
         "Требования к ответу:\n"
@@ -337,6 +386,121 @@ def load_index_bundle(index_dir: Path) -> Tuple[Any, List[Dict[str, Any]]]:
     return index, metadata
 
 
+def load_session(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    rows: List[Dict[str, str]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(rec, dict):
+                rows.append(
+                    {
+                        "user": str(rec.get("user", "")),
+                        "assistant": str(rec.get("assistant", "")),
+                    }
+                )
+    return rows
+
+
+def save_session(path: Path, rows: Sequence[Dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(
+                json.dumps(
+                    {"user": row.get("user", ""), "assistant": row.get("assistant", "")},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+
+def init_prompt_history(path: Path) -> None:
+    if readline is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            readline.read_history_file(str(path))
+        except Exception:  # noqa: BLE001
+            pass
+    readline.set_history_length(2000)
+
+
+def persist_prompt_history(path: Path) -> None:
+    if readline is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        readline.write_history_file(str(path))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def create_chat_prompt_session(prompt_history_path: Path) -> Any:
+    if PromptSession is None or FileHistory is None:
+        return None
+    prompt_history_path.parent.mkdir(parents=True, exist_ok=True)
+    completer = WordCompleter(CHAT_COMMANDS, ignore_case=True, sentence=True) if WordCompleter else None
+    auto_suggest = AutoSuggestFromHistory() if AutoSuggestFromHistory else None
+    return PromptSession(history=FileHistory(str(prompt_history_path)), completer=completer, auto_suggest=auto_suggest)
+
+
+def render_chat_output(console: Any, answer: str, retrieved: Sequence[Dict[str, Any]], debug: bool) -> None:
+    if console is None or Panel is None or Table is None:
+        print(f"\nБот> {answer}\n")
+        if debug:
+            print("[debug] top-k retrieval:")
+            for i, item in enumerate(retrieved, start=1):
+                print(
+                    f"{i}. score={item['score']:.4f} hybrid={item.get('hybrid_score', item['score']):.4f} "
+                    f"| {item['file_name']}#{item['section']}\n"
+                    f"   {preview_text(item['text'])}"
+                )
+        print("Источники (retrieval):")
+        for item in retrieved:
+            print(
+                f"- {format_source_link(item)} "
+                f"(score={item['score']:.3f}, hybrid={item.get('hybrid_score', item['score']):.3f})"
+            )
+        return
+
+    console.print(Panel(answer, title="Бот", border_style="cyan"))
+    table = Table(title="Источники (retrieval)")
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Источник")
+    table.add_column("Score", justify="right")
+    table.add_column("Hybrid", justify="right")
+    for i, item in enumerate(retrieved, start=1):
+        table.add_row(
+            str(i),
+            format_source_link(item),
+            f"{item['score']:.3f}",
+            f"{item.get('hybrid_score', item['score']):.3f}",
+        )
+    console.print(table)
+
+    if debug:
+        debug_table = Table(title="Debug top-k chunks")
+        debug_table.add_column("#", justify="right", style="bold")
+        debug_table.add_column("File#Section")
+        debug_table.add_column("Preview")
+        for i, item in enumerate(retrieved, start=1):
+            debug_table.add_row(
+                str(i),
+                f"{item['file_name']}#{item['section']}",
+                preview_text(item["text"], limit=180),
+            )
+        console.print(debug_table)
+
+
 def safe_stdin_input(prompt: str) -> str:
     sys.stdout.write(prompt)
     sys.stdout.flush()
@@ -373,38 +537,82 @@ def cmd_chat(args: argparse.Namespace) -> None:
     index_dir = Path(args.index_dir)
     index, metadata = load_index_bundle(index_dir)
     client = LMStudioClient(args.base_url, args.api_key, args.timeout)
+    prompt_history_path = Path(args.prompt_history_file)
+    session_path = Path(args.session_file)
+    console = Console() if Console else None
 
-    print("[chat] interactive mode. Для выхода: /exit")
+    init_prompt_history(prompt_history_path)
+    pt_session = create_chat_prompt_session(prompt_history_path)
+    session_rows = load_session(session_path) if args.load_session else []
+    if session_rows:
+        msg = f"[chat] loaded session turns: {len(session_rows)} from {session_path}"
+        if console:
+            console.print(msg)
+        else:
+            print(msg)
+    if console:
+        console.print("[chat] interactive mode. Для выхода: /exit")
+        console.print("[chat] команды: /reset (очистить память сессии), /save (сохранить сессию)")
+        if pt_session is None:
+            console.print("[chat] prompt_toolkit не найден, используется стандартный ввод.")
+    else:
+        print("[chat] interactive mode. Для выхода: /exit")
+        print("[chat] команды: /reset (очистить память сессии), /save (сохранить сессию)")
     while True:
-        question = safe_stdin_input("\nВы> ").strip()
+        if pt_session is not None:
+            try:
+                question = pt_session.prompt("Вы> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                question = "/exit"
+        else:
+            try:
+                question = input("\nВы> ").strip()
+            except UnicodeDecodeError:
+                question = safe_stdin_input("\nВы> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                question = "/exit"
         if not question:
             continue
+        if readline is not None and pt_session is None:
+            readline.add_history(question)
         if question in {"/exit", "exit", "quit"}:
-            print("[chat] bye")
+            if args.save_session:
+                save_session(session_path, session_rows)
+            persist_prompt_history(prompt_history_path)
+            if console:
+                console.print("[chat] bye")
+            else:
+                print("[chat] bye")
             break
+        if question == "/reset":
+            session_rows = []
+            if args.save_session:
+                save_session(session_path, session_rows)
+            if console:
+                console.print("[chat] session memory cleared")
+            else:
+                print("[chat] session memory cleared")
+            continue
+        if question == "/save":
+            save_session(session_path, session_rows)
+            persist_prompt_history(prompt_history_path)
+            if console:
+                console.print(f"[chat] session saved: {session_path}")
+            else:
+                print(f"[chat] session saved: {session_path}")
+            continue
 
         retrieved = retrieve(client, index, metadata, args.embed_model, question, args.top_k)
-        messages = build_prompt(question, retrieved)
+        history_for_prompt = session_rows[-args.history_turns :] if args.history_turns > 0 else []
+        messages = build_prompt_with_memory(question, retrieved, history_for_prompt)
         answer = client.chat(args.chat_model, messages, temperature=args.temperature, max_tokens=args.max_tokens)
         answer = normalize_conflict_answer(answer, retrieved)
         answer = ensure_sources_block(answer, retrieved)
-
-        if args.debug:
-            print("\n[debug] top-k retrieval:")
-            for i, item in enumerate(retrieved, start=1):
-                print(
-                    f"{i}. score={item['score']:.4f} hybrid={item.get('hybrid_score', item['score']):.4f} "
-                    f"| {item['file_name']}#{item['section']}\n"
-                    f"   {preview_text(item['text'])}"
-                )
-
-        print(f"\nБот> {answer}\n")
-        print("Источники (retrieval):")
-        for item in retrieved:
-            print(
-                f"- {format_source_link(item)} "
-                f"(score={item['score']:.3f}, hybrid={item.get('hybrid_score', item['score']):.3f})"
-            )
+        session_rows.append({"user": question, "assistant": answer})
+        if args.save_session:
+            save_session(session_path, session_rows)
+        persist_prompt_history(prompt_history_path)
+        render_chat_output(console, answer, retrieved, args.debug)
 
 
 def detect_refusal(text: str) -> bool:
@@ -646,6 +854,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--temperature", type=float, default=0.1, help="Температура генерации")
     p_chat.add_argument("--max-tokens", type=int, default=700, help="Максимум токенов ответа")
     p_chat.add_argument("--debug", action="store_true", help="Показать score и превью извлеченных чанков")
+    p_chat.add_argument(
+        "--session-file",
+        default="data/factory_rag/chat_session.jsonl",
+        help="Файл памяти сессии (jsonl: user/assistant)",
+    )
+    p_chat.add_argument(
+        "--history-turns",
+        type=int,
+        default=6,
+        help="Сколько последних ходов сессии включать в prompt",
+    )
+    p_chat.add_argument(
+        "--prompt-history-file",
+        default="data/factory_rag/.prompt_history",
+        help="Файл истории ввода для стрелок вверх/вниз",
+    )
+    p_chat.set_defaults(load_session=True, save_session=True)
+    p_chat.add_argument("--load-session", dest="load_session", action="store_true", help="Загружать память сессии при старте")
+    p_chat.add_argument("--no-load-session", dest="load_session", action="store_false", help="Не загружать память сессии")
+    p_chat.add_argument("--save-session", dest="save_session", action="store_true", help="Сохранять память сессии после каждого ответа")
+    p_chat.add_argument("--no-save-session", dest="save_session", action="store_false", help="Не сохранять память сессии")
     p_chat.set_defaults(func=cmd_chat)
 
     p_diag = sub.add_parser("diagnose", help="Диагностика retrieval-качества без генерации ответа")

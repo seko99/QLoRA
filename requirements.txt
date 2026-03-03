@@ -1,0 +1,19 @@
+# Core
+openai
+numpy
+faiss-cpu
+prompt_toolkit
+rich
+
+# HF / training / evaluation
+torch
+transformers
+datasets
+accelerate
+peft
+trl
+bitsandbytes
+unsloth
+
+# Utilities
+huggingface_hub[cli]

@@ -40,8 +40,14 @@ source ~/venvs/QLoRA/bin/activate
 Установка Python-зависимостей:
 
 ```bash
-pip install -U "torch" "transformers" "datasets" "accelerate" "peft" "trl" "bitsandbytes"
+pip install -U -r requirements.txt
 ```
+
+Примечание:
+
+- `requirements.txt` покрывает генераторы, RAG-CLI и pipeline обучения/оценки.
+- Для `unsloth`/`bitsandbytes` нужен совместимый Linux + NVIDIA/CUDA стек.
+- Если нужен только RAG/генерация (без обучения), достаточно: `openai`, `numpy`, `faiss-cpu`, `prompt_toolkit`, `rich`.
 
 Скачивание базовой модели с Hugging Face:
 
@@ -180,7 +186,7 @@ python scripts/train_qlora_unsloth.py \
 Установка зависимости для индекса:
 
 ```bash
-pip install -U faiss-cpu
+pip install -U -r requirements.txt
 ```
 
 ### 1) Построить индекс по документам
