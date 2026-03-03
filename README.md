@@ -193,8 +193,8 @@ pip install -U -r requirements.txt
 
 ```bash
 python scripts/rag_cli_bot.py \
-  --chat-model model-identifier \
-  --embed-model model-identifier \
+  --chat-model ferro_stream \
+  --embed-model text-embedding-nomic-embed-text-v1.5 \
   index \
   --docs-dir data/factory_rag/documents \
   --index-dir data/factory_rag/index
@@ -204,21 +204,28 @@ python scripts/rag_cli_bot.py \
 
 ```bash
 python scripts/rag_cli_bot.py \
-  --chat-model model-identifier \
-  --embed-model model-identifier \
+  --chat-model ferro_stream \
+  --embed-model text-embedding-nomic-embed-text-v1.5 \
   chat \
   --index-dir data/factory_rag/index \
-  --top-k 5
+  --top-k 8
 ```
 
 Ответ выводится с блоком источников и ссылками вида `filename.md#Раздел`.
+
+Текущие дефолты в `rag_cli_bot.py`:
+
+- `index --chunk-size 900`
+- `chat/eval/diagnose --top-k 8`
+- `--chat-model ferro_stream`
+- `--embed-model text-embedding-nomic-embed-text-v1.5`
 
 ### 3) Запустить оценку качества
 
 ```bash
 python scripts/rag_cli_bot.py \
-  --chat-model model-identifier \
-  --embed-model model-identifier \
+  --chat-model ferro_stream \
+  --embed-model text-embedding-nomic-embed-text-v1.5 \
   eval \
   --index-dir data/factory_rag/index \
   --eval-path data/factory_rag/training_dataset.jsonl \
@@ -231,6 +238,88 @@ python scripts/rag_cli_bot.py \
 - `hit_at_k` - retrieval попадание expected source в top-k (для known).
 - `refusal_accuracy` - доля корректных отказов на unknown.
 - `groundedness_avg` - средняя доля токенов ответа, пересекающихся с извлечённым контекстом.
+
+## Практический Playbook (Генерация -> Обучение -> Retrieval -> Eval)
+
+### 1) Генерация данных для RAG-SFT
+
+- Рекомендуемая пропорция сэмплов: `known=0.55`, `conflict=0.25`, `unknown=0.20`.
+- Для `dataset-size=1200` и `40` документов ставьте `--qa-per-doc-attempt 20+`, иначе known-часть упрётся в емкость.
+- Для режима только датасета используйте существующую папку документов:
+
+```bash
+python scripts/gen_factory_rag_assets.py \
+  --mode dataset \
+  --dataset-size 1200 \
+  --docs-dir data/factory_rag/documents \
+  --out-dir data/factory_rag \
+  --model model-identifier \
+  --known-ratio 0.55 \
+  --conflict-ratio 0.25 \
+  --eval-size 150 \
+  --qa-per-doc-attempt 20
+```
+
+### 2) Обучение
+
+- Обучайте на `training_dataset.jsonl`.
+- Следите, чтобы в train были все типы (`known/conflict/unknown`) и источники в ответах.
+
+### 3) Индексация и Retrieval-тюнинг
+
+- Для лучшего retrieval используйте более мелкие чанки:
+
+```bash
+python scripts/rag_cli_bot.py \
+  --embed-model text-embedding-nomic-embed-text-v1.5 \
+  index \
+  --docs-dir data/factory_rag/documents \
+  --index-dir data/factory_rag/index \
+  --chunk-size 900 \
+  --chunk-overlap 180
+```
+
+- Тюньте одновременно `top_k` и `pool_k`:
+  - `top_k` - сколько чанков уходит в prompt.
+  - `pool_k` - сколько кандидатов берется до rerank (`0` = авто `top_k*4`).
+- Рекомендуемый старт: `top_k=8`, `pool_k=40`.
+
+### 4) Диагностика retrieval
+
+```bash
+python scripts/rag_cli_bot.py \
+  --embed-model text-embedding-nomic-embed-text-v1.5 \
+  diagnose \
+  --index-dir data/factory_rag/index \
+  --question "Какая температура термообработки сплава КТ-47?" \
+  --top-k 8 \
+  --pool-k 40
+```
+
+Если в top-k много `Область применения/Термины`, а не `Требования/Параметры`, нужно дальше тюнить chunking и rerank.
+
+### 5) Оценка качества
+
+- Оценивайте на `rag_eval_set.jsonl` (а не на train-файле):
+
+```bash
+python scripts/rag_cli_bot.py \
+  --chat-model ferro_stream \
+  --embed-model text-embedding-nomic-embed-text-v1.5 \
+  eval \
+  --index-dir data/factory_rag/index \
+  --eval-path data/factory_rag/rag_eval_set.jsonl \
+  --max-samples 300 \
+  --top-k 8 \
+  --pool-k 40 \
+  --report-out data/factory_rag/rag_eval_report.json
+```
+
+Интерпретация метрик:
+
+- Низкий `hit_at_k` -> проблема retrieval (индекс/эмбеддинги/chunking/rerank).
+- Низкий `refusal_accuracy` при нормальном `hit_at_k` -> проблема поведения модели (дообучение/промпт).
+- Низкий `groundedness_avg` -> ответы слабо привязаны к контексту, усиливайте known/conflict-сэмплы и формат источников.
 
 ## 3) Merge LoRA в базовую модель
 

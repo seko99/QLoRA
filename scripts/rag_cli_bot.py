@@ -43,7 +43,8 @@ except Exception:  # noqa: BLE001
 
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_API_KEY = "lm-studio"
-DEFAULT_MODEL = "model-identifier"
+DEFAULT_CHAT_MODEL = "ferro_stream"
+DEFAULT_EMBED_MODEL = "text-embedding-nomic-embed-text-v1.5"
 CHAT_COMMANDS = ["/exit", "/reset", "/save"]
 
 
@@ -242,6 +243,7 @@ def retrieve(
     embed_model: str,
     query: str,
     top_k: int,
+    pool_k: int = 0,
 ) -> List[Dict[str, Any]]:
     import numpy as np
 
@@ -251,8 +253,8 @@ def retrieve(
     norms[norms == 0] = 1.0
     q_mat /= norms
 
-    pool_k = min(max(top_k * 4, top_k), len(metadata))
-    scores, ids = index.search(q_mat, pool_k)
+    effective_pool_k = min(max(pool_k if pool_k > 0 else top_k * 4, top_k), len(metadata))
+    scores, ids = index.search(q_mat, effective_pool_k)
     found: List[Dict[str, Any]] = []
     q_tokens = set(re.findall(r"[a-zа-я0-9]{3,}", query.lower(), flags=re.IGNORECASE))
     for score, idx in zip(scores[0], ids[0]):
@@ -602,7 +604,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 print(f"[chat] session saved: {session_path}")
             continue
 
-        retrieved = retrieve(client, index, metadata, args.embed_model, question, args.top_k)
+        retrieved = retrieve(client, index, metadata, args.embed_model, question, args.top_k, args.pool_k)
         history_for_prompt = session_rows[-args.history_turns :] if args.history_turns > 0 else []
         messages = build_prompt_with_memory(question, retrieved, history_for_prompt)
         answer = client.chat(args.chat_model, messages, temperature=args.temperature, max_tokens=args.max_tokens)
@@ -719,7 +721,7 @@ def cmd_diagnose(args: argparse.Namespace) -> None:
 
     out_rows: List[Dict[str, Any]] = []
     for i, question in enumerate(questions, start=1):
-        retrieved = retrieve(client, index, metadata, args.embed_model, question, args.top_k)
+        retrieved = retrieve(client, index, metadata, args.embed_model, question, args.top_k, args.pool_k)
         top_scores = [x["score"] for x in retrieved]
         avg_score = sum(top_scores) / len(top_scores) if top_scores else 0.0
         max_score = max(top_scores) if top_scores else 0.0
@@ -785,7 +787,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
         stype = sample.get("meta", {}).get("sample_type", "known")
         expected_doc = sample.get("meta", {}).get("source_doc")
 
-        retrieved = retrieve(client, index, metadata, args.embed_model, user_msg, args.top_k)
+        retrieved = retrieve(client, index, metadata, args.embed_model, user_msg, args.top_k, args.pool_k)
         reply = client.chat(
             args.chat_model,
             build_prompt(user_msg, retrieved),
@@ -835,22 +837,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="URL OpenAI-совместимого API LM Studio")
     parser.add_argument("--api-key", default=DEFAULT_API_KEY, help="API key для LM Studio")
     parser.add_argument("--timeout", type=float, default=120.0, help="Таймаут API-запроса, сек")
-    parser.add_argument("--chat-model", default=DEFAULT_MODEL, help="Модель чата (дообученная)")
-    parser.add_argument("--embed-model", default=DEFAULT_MODEL, help="Модель embeddings")
+    parser.add_argument("--chat-model", default=DEFAULT_CHAT_MODEL, help="Модель чата (дообученная)")
+    parser.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL, help="Модель embeddings")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_index = sub.add_parser("index", help="Построить FAISS-индекс по markdown-документам")
     p_index.add_argument("--docs-dir", default="data/factory_rag/documents", help="Папка с markdown-документами")
     p_index.add_argument("--index-dir", default="data/factory_rag/index", help="Папка для индекса")
-    p_index.add_argument("--chunk-size", type=int, default=1400, help="Размер чанка в символах")
+    p_index.add_argument("--chunk-size", type=int, default=900, help="Размер чанка в символах")
     p_index.add_argument("--chunk-overlap", type=int, default=200, help="Перекрытие чанков")
     p_index.add_argument("--embed-batch-size", type=int, default=16, help="Батч для embedding-запроса")
     p_index.set_defaults(func=cmd_index)
 
     p_chat = sub.add_parser("chat", help="Интерактивный CLI-чат по RAG")
     p_chat.add_argument("--index-dir", default="data/factory_rag/index", help="Папка с индексом")
-    p_chat.add_argument("--top-k", type=int, default=5, help="Количество извлекаемых чанков")
+    p_chat.add_argument("--top-k", type=int, default=8, help="Количество извлекаемых чанков")
+    p_chat.add_argument(
+        "--pool-k",
+        type=int,
+        default=0,
+        help="Размер пула кандидатов до rerank (0 = авто, top_k*4)",
+    )
     p_chat.add_argument("--temperature", type=float, default=0.1, help="Температура генерации")
     p_chat.add_argument("--max-tokens", type=int, default=700, help="Максимум токенов ответа")
     p_chat.add_argument("--debug", action="store_true", help="Показать score и превью извлеченных чанков")
@@ -882,7 +890,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_diag.add_argument("--question", default="", help="Один вопрос для диагностики")
     p_diag.add_argument("--questions-file", default="", help="Файл с вопросами (по одному на строку)")
     p_diag.add_argument("--max-samples", type=int, default=50, help="Лимит вопросов из --questions-file")
-    p_diag.add_argument("--top-k", type=int, default=5, help="Количество извлекаемых чанков")
+    p_diag.add_argument("--top-k", type=int, default=8, help="Количество извлекаемых чанков")
+    p_diag.add_argument(
+        "--pool-k",
+        type=int,
+        default=0,
+        help="Размер пула кандидатов до rerank (0 = авто, top_k*4)",
+    )
     p_diag.add_argument(
         "--report-out",
         default="data/factory_rag/retrieval_diagnose.json",
@@ -894,7 +908,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval.add_argument("--index-dir", default="data/factory_rag/index", help="Папка с индексом")
     p_eval.add_argument("--eval-path", default="data/factory_rag/training_dataset.jsonl", help="JSONL eval-набор")
     p_eval.add_argument("--max-samples", type=int, default=120, help="Лимит сэмплов для оценки")
-    p_eval.add_argument("--top-k", type=int, default=5, help="Количество извлекаемых чанков")
+    p_eval.add_argument("--top-k", type=int, default=8, help="Количество извлекаемых чанков")
+    p_eval.add_argument(
+        "--pool-k",
+        type=int,
+        default=0,
+        help="Размер пула кандидатов до rerank (0 = авто, top_k*4)",
+    )
     p_eval.add_argument("--temperature", type=float, default=0.1, help="Температура генерации")
     p_eval.add_argument("--max-tokens", type=int, default=500, help="Максимум токенов ответа")
     p_eval.add_argument("--report-out", default="data/factory_rag/rag_eval_report.json", help="Куда сохранить отчет")
