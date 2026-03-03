@@ -86,17 +86,70 @@ python scripts/gen_dataset.py
 
 ```bash
 python scripts/gen_factory_rag_assets.py \
+  --mode all \
   --docs-count 40 \
   --dataset-size 1200 \
   --out-dir data/factory_rag \
+  --model local-model \
+  --known-ratio 0.55 \
+  --conflict-ratio 0.25 \
+  --eval-size 150 \
+  --qa-per-doc-attempt 20
+```
+
+Только документы:
+
+```bash
+python scripts/gen_factory_rag_assets.py \
+  --mode docs \
+  --docs-count 40 \
+  --out-dir data/factory_rag \
   --model local-model
 ```
+
+Только датасет из существующих документов:
+
+```bash
+python scripts/gen_factory_rag_assets.py \
+  --mode dataset \
+  --dataset-size 1200 \
+  --docs-dir data/factory_rag/documents \
+  --out-dir data/factory_rag \
+  --model local-model \
+  --known-ratio 0.55 \
+  --conflict-ratio 0.25 \
+  --eval-size 150 \
+  --qa-per-doc-attempt 20
+```
+
+Полезно про параметры генератора:
+
+- `--mode {all,docs,dataset}` - что генерировать.
+- `--docs-dir` - источник markdown-документов для `--mode dataset`.
+- `--known-ratio`, `--conflict-ratio` - доли known/conflict; остаток идет в unknown.
+- `--qa-per-doc-attempt` - лимит Q/A-пар на документ для known.
+- `--eval-size` - размер отдельного `rag_eval_set.jsonl`.
+
+Ограничение known-части:
+
+- Максимум known при текущих параметрах примерно `кол-во_документов * qa-per-doc-attempt`.
+- Пример: `40 документов * 8 = 320 known` (при цели `660` будет недобор).
+- Для `dataset-size=1200` и `known-ratio=0.55` (цель `660`) используйте `--qa-per-doc-attempt 20` или выше.
+
+Прогресс генерации датасета в консоли:
+
+- `known progress`
+- `scanned docs for known`
+- `conflict progress`
+- `unknown progress`
+- `eval progress`
 
 Выход:
 
 - `data/factory_rag/documents/*.md` - сгенерированные документы.
 - `data/factory_rag/training_dataset.jsonl` - обучающий датасет в формате `messages`.
-- `data/factory_rag/dataset_stats.json` - статистика (known/unknown).
+- `data/factory_rag/rag_eval_set.jsonl` - отдельный eval-набор (`known/conflict/unknown`).
+- `data/factory_rag/dataset_stats.json` - статистика (`known/conflict/unknown` + eval size).
 
 ## 2) Обучение QLoRA
 
