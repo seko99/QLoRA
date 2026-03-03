@@ -6,6 +6,8 @@
 
 - `scripts/get_dataset_pizza.py` - генерация синтетического train/eval датасета с уникальными фактами.
 - `scripts/gen_dataset.py` - генерация датасета через локальную LLM (LM Studio/OpenAI-совместимый API).
+- `scripts/gen_factory_rag_assets.py` - генерация вымышленных markdown-документов производства + SFT датасета для RAG-поведения.
+- `scripts/rag_cli_bot.py` - CLI RAG-бот (LM Studio embeddings/chat + FAISS) с командами `index`, `chat`, `eval`.
 - `scripts/train_qlora_unsloth.py` - обучение QLoRA через Unsloth + TRL `SFTTrainer`.
 - `scripts/merge_lora.py` - merge LoRA-адаптера в базовую модель.
 - `scripts/convert_to_gguf.sh` - конвертация merged HF-модели в GGUF.
@@ -80,6 +82,22 @@ python scripts/get_dataset_pizza.py --n 1200 --eval-n 120 \
 python scripts/gen_dataset.py
 ```
 
+Документы + датасет для RAG-демо (вымышленное производство):
+
+```bash
+python scripts/gen_factory_rag_assets.py \
+  --docs-count 40 \
+  --dataset-size 1200 \
+  --out-dir data/factory_rag \
+  --model local-model
+```
+
+Выход:
+
+- `data/factory_rag/documents/*.md` - сгенерированные документы.
+- `data/factory_rag/training_dataset.jsonl` - обучающий датасет в формате `messages`.
+- `data/factory_rag/dataset_stats.json` - статистика (known/unknown).
+
 ## 2) Обучение QLoRA
 
 Базовый запуск:
@@ -103,6 +121,57 @@ python scripts/train_qlora_unsloth.py \
 - `--target-modules` (через запятую)
 - `--dataset-num-proc`
 - `--optim`, `--lr-scheduler-type`
+
+## RAG CLI Bot (LM Studio + FAISS)
+
+Установка зависимости для индекса:
+
+```bash
+pip install -U faiss-cpu
+```
+
+### 1) Построить индекс по документам
+
+```bash
+python scripts/rag_cli_bot.py \
+  --chat-model model-identifier \
+  --embed-model model-identifier \
+  index \
+  --docs-dir data/factory_rag/documents \
+  --index-dir data/factory_rag/index
+```
+
+### 2) Запустить CLI-чат
+
+```bash
+python scripts/rag_cli_bot.py \
+  --chat-model model-identifier \
+  --embed-model model-identifier \
+  chat \
+  --index-dir data/factory_rag/index \
+  --top-k 5
+```
+
+Ответ выводится с блоком источников и ссылками вида `filename.md#Раздел`.
+
+### 3) Запустить оценку качества
+
+```bash
+python scripts/rag_cli_bot.py \
+  --chat-model model-identifier \
+  --embed-model model-identifier \
+  eval \
+  --index-dir data/factory_rag/index \
+  --eval-path data/factory_rag/training_dataset.jsonl \
+  --max-samples 120 \
+  --report-out data/factory_rag/rag_eval_report.json
+```
+
+Метрики отчёта:
+
+- `hit_at_k` - retrieval попадание expected source в top-k (для known).
+- `refusal_accuracy` - доля корректных отказов на unknown.
+- `groundedness_avg` - средняя доля токенов ответа, пересекающихся с извлечённым контекстом.
 
 ## 3) Merge LoRA в базовую модель
 
