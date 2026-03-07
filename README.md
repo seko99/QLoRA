@@ -1,320 +1,295 @@
-# QLoRA Fine-Tuning (Unsloth) + GGUF Pipeline
+# QLoRA + Support RAG (LlamaIndex Hybrid)
 
-Проект для дообучения локальной LLM на вымышленных производственных документах, последующего merge LoRA-адаптера, экспорта в GGUF и запуска RAG CLI-бота.
+Проект для:
 
-## Что в проекте
+- генерации вымышленных документов техподдержки торговой компании;
+- генерации SFT-датасета и demo-вопросов;
+- hybrid RAG-инференса на LlamaIndex (BM25 + vector + optional rerank);
+- QLoRA-обучения, merge и экспорта в GGUF.
 
-- `scripts/gen_factory_rag_assets.py` - генерация вымышленных markdown-документов производства + SFT датасета для RAG-поведения.
-- `scripts/rag_cli_bot.py` - CLI RAG-бот (LM Studio embeddings/chat + FAISS) с командами `index`, `chat`, `diagnose`, `eval`.
-- `scripts/train_qlora_unsloth.py` - обучение QLoRA через Unsloth + TRL `SFTTrainer`.
-- `scripts/merge_lora.py` - merge LoRA-адаптера в базовую модель.
-- `scripts/convert_to_gguf.sh` - конвертация merged HF-модели в GGUF.
-- `scripts/quantize.sh` - квантизация GGUF (например, `Q4_K_M`).
+## Что есть в репозитории
+
+- `scripts/gen_support_rag_docs.py` — генерация support-документов, SFT-датасета и demo-вопросов.
+- `scripts/build_llamaindex_index.py` — построение и локальное сохранение LlamaIndex индекса.
+- `scripts/llamaindex_hybrid_rag.py` — инференс с hybrid retrieval, rerank, интерактивным CLI.
+- `scripts/train_qlora_unsloth.py` — обучение QLoRA.
+- `scripts/merge_lora.py` — merge LoRA в базовую модель.
+- `scripts/convert_to_gguf.sh` — конвертация merged модели в GGUF.
+- `scripts/quantize.sh` — квантизация GGUF.
 
 ## Требования
 
-- Linux + NVIDIA GPU (для Unsloth training).
-- Python 3.12 и окружение с пакетами `unsloth`, `trl`, `transformers`, `peft`, `datasets`, `torch`.
-- `llama.cpp` в директории `../llama.cpp` (рекомендуемо; есть fallback на `./llama.cpp`).
-- Собранный `llama-quantize` по пути `../llama.cpp/build/bin/llama-quantize`.
-
-Сборка `llama.cpp`:
-
-```bash
-cd ..
-git clone https://github.com/ggml-org/llama.cpp
-cd llama.cpp
-cmake -B build
-cmake --build build -j
-cd ../QLoRA
-```
-
-Пример активации окружения:
+- Linux + Python 3.12.
+- Для обучения: NVIDIA GPU + совместимый CUDA стек.
+- Виртуальное окружение (пример):
 
 ```bash
 source ~/venvs/QLoRA/bin/activate
 ```
 
-Установка Python-зависимостей:
+Установка зависимостей:
 
 ```bash
 pip install -U -r requirements.txt
 ```
 
-Примечание:
+## Быстрый старт: Support RAG
 
-- `requirements.txt` покрывает генераторы, RAG-CLI и pipeline обучения/оценки.
-- Для `unsloth`/`bitsandbytes` нужен совместимый Linux + NVIDIA/CUDA стек.
-- Если нужен только RAG/генерация (без обучения), достаточно: `openai`, `numpy`, `faiss-cpu`, `prompt_toolkit`, `rich`.
-
-Скачивание базовой модели с Hugging Face:
+### 1) Сгенерировать документы + датасет + demo-вопросы
 
 ```bash
-pip install -U "huggingface_hub[cli]" git-lfs
-git lfs install
-hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir base_model
-```
+source ~/venvs/QLoRA/bin/activate
 
-## Структура данных
-
-Train-файл ожидается в формате JSONL, по одному объекту на строку:
-
-```json
-{"messages":[{"role":"system","content":"..."},{"role":"user","content":"..."},{"role":"assistant","content":"..."}]}
-```
-
-## 1) Генерация датасета
-
-Документы + датасет для RAG-демо (вымышленное производство):
-
-```bash
-python scripts/gen_factory_rag_assets.py \
+python scripts/gen_support_rag_docs.py \
   --mode all \
-  --docs-count 40 \
-  --dataset-size 1200 \
-  --out-dir data/factory_rag \
-  --model local-model \
-  --known-ratio 0.55 \
-  --conflict-ratio 0.25 \
-  --eval-size 150 \
-  --qa-per-doc-attempt 20
+  --docs-count 60 \
+  --dataset-size 1500 \
+  --questions-count 50 \
+  --out-dir data/trade_support_rag \
+  --model qwen3-coder-30b-a3b-instruct \
+  --qa-per-doc-attempt 15 \
+  --grounded-ratio 0.6 \
+  --sensitive-ratio 0.2 \
+  --clarify-ratio 0.1 \
+  --enforce-consistency \
+  --doc-retries 3 \
+  --unique-processes
 ```
+
+### 2) Построить LlamaIndex
+
+```bash
+source ~/venvs/QLoRA/bin/activate
+
+python scripts/build_llamaindex_index.py \
+  --docs-dir data/trade_support_rag/documents \
+  --persist-dir data/trade_support_rag/llamaindex_store \
+  --base-url http://localhost:1234/v1 \
+  --embed-model text-embedding-nomic-embed-text-v1.5 \
+  --chunk-size 900 \
+  --chunk-overlap 150
+```
+
+### 3) Задать вопрос (RAG on)
+
+```bash
+source ~/venvs/QLoRA/bin/activate
+
+python scripts/llamaindex_hybrid_rag.py \
+  --index-dir data/trade_support_rag/llamaindex_store \
+  --chat-model local-model \
+  --base-url http://localhost:1234/v1 \
+  --question "Почему заказ подтверждается с задержкой после оплаты?" \
+  --top-k 8 \
+  --vector-top-k 16 \
+  --bm25-top-k 16 \
+  --rerank llm \
+  --rerank-model local-model \
+  --rerank-candidates 24 \
+  --show-retrieval
+```
+
+### 4) Сравнение без RAG (RAG off)
+
+```bash
+source ~/venvs/QLoRA/bin/activate
+
+python scripts/llamaindex_hybrid_rag.py \
+  --disable-rag \
+  --chat-model local-model \
+  --base-url http://localhost:1234/v1 \
+  --question "Почему заказ подтверждается с задержкой после оплаты?"
+```
+
+## `gen_support_rag_docs.py`
+
+Назначение: единый генератор документов, SFT-датасета и demo-вопросов.
+
+### Режимы
+
+- `--mode docs` — только документы (`documents/*.md`).
+- `--mode dataset` — только `training_dataset.jsonl` (из существующих документов).
+- `--mode questions` — только demo-вопросы (`demo_questions.txt/json`).
+- `--mode all` — документы + датасет + вопросы.
+
+### Примеры
 
 Только документы:
 
 ```bash
-python scripts/gen_factory_rag_assets.py \
+python scripts/gen_support_rag_docs.py \
   --mode docs \
-  --docs-count 40 \
-  --out-dir data/factory_rag \
-  --model local-model
+  --docs-count 60 \
+  --out-dir data/trade_support_rag \
+  --model qwen3-coder-30b-a3b-instruct
 ```
 
-Только датасет из существующих документов:
+Только датасет:
 
 ```bash
-python scripts/gen_factory_rag_assets.py \
+python scripts/gen_support_rag_docs.py \
   --mode dataset \
-  --dataset-size 1200 \
-  --docs-dir data/factory_rag/documents \
-  --out-dir data/factory_rag \
-  --model local-model \
-  --known-ratio 0.55 \
-  --conflict-ratio 0.25 \
-  --eval-size 150 \
-  --qa-per-doc-attempt 20
+  --dataset-size 1500 \
+  --docs-dir data/trade_support_rag/documents \
+  --out-dir data/trade_support_rag \
+  --model qwen3-coder-30b-a3b-instruct \
+  --qa-per-doc-attempt 15 \
+  --grounded-ratio 0.6 \
+  --sensitive-ratio 0.2 \
+  --clarify-ratio 0.1
 ```
 
-Полезно про параметры генератора:
-
-- `--mode {all,docs,dataset}` - что генерировать.
-- `--docs-dir` - источник markdown-документов для `--mode dataset`.
-- `--known-ratio`, `--conflict-ratio` - доли known/conflict; остаток идет в unknown.
-- `--qa-per-doc-attempt` - лимит Q/A-пар на документ для known.
-- `--eval-size` - размер отдельного `rag_eval_set.jsonl`.
-
-Ограничение known-части:
-
-- Максимум known при текущих параметрах примерно `кол-во_документов * qa-per-doc-attempt`.
-- Пример: `40 документов * 8 = 320 known` (при цели `660` будет недобор).
-- Для `dataset-size=1200` и `known-ratio=0.55` (цель `660`) используйте `--qa-per-doc-attempt 20` или выше.
-
-Прогресс генерации датасета в консоли:
-
-- `known progress`
-- `scanned docs for known`
-- `conflict progress`
-- `unknown progress`
-- `eval progress`
-
-Выход:
-
-- `data/factory_rag/documents/*.md` - сгенерированные документы.
-- `data/factory_rag/training_dataset.jsonl` - обучающий датасет в формате `messages`.
-- `data/factory_rag/rag_eval_set.jsonl` - отдельный eval-набор (`known/conflict/unknown`).
-- `data/factory_rag/dataset_stats.json` - статистика (`known/conflict/unknown` + eval size).
-
-## 2) Обучение QLoRA
-
-Базовый запуск:
+Только вопросы:
 
 ```bash
+python scripts/gen_support_rag_docs.py \
+  --mode questions \
+  --questions-count 50 \
+  --docs-dir data/trade_support_rag/documents \
+  --out-dir data/trade_support_rag \
+  --model qwen3-coder-30b-a3b-instruct
+```
+
+### Ключевые аргументы
+
+- `--docs-count` — число генерируемых документов.
+- `--dataset-size` — размер SFT-датасета.
+- `--questions-count` — число demo-вопросов.
+- `--qa-per-doc-attempt` — максимум grounded Q/A на документ.
+- `--grounded-ratio`, `--sensitive-ratio`, `--clarify-ratio` — баланс типов сэмплов.
+- `--doc-temperature`, `--qa-temperature`, `--questions-temperature` — temperature по этапам.
+- `--docs-dir` — источник документов для `dataset/questions`.
+- `--out-dir` — папка вывода.
+- `--enforce-consistency` / `--no-enforce-consistency` — включить/выключить проверку на конфликты.
+- `--doc-retries` — число перегенераций документа при провале consistency-check.
+- `--unique-processes` / `--allow-duplicate-processes` — управление повторами процессов.
+
+### Выходные файлы
+
+- `data/trade_support_rag/documents/*.md`
+- `data/trade_support_rag/canonical_facts.json`
+- `data/trade_support_rag/training_dataset.jsonl`
+- `data/trade_support_rag/dataset_stats.json`
+- `data/trade_support_rag/demo_questions.txt`
+- `data/trade_support_rag/demo_questions.json`
+
+`demo_questions.json` включает поля для сравнения:
+
+- `question`
+- `doc_number`
+- `doc_filename`
+- `answer_line`
+- `source_excerpt`
+
+## `build_llamaindex_index.py`
+
+Назначение: build + persist индекса LlamaIndex для последующего retrieval.
+
+### Пример
+
+```bash
+python scripts/build_llamaindex_index.py \
+  --docs-dir data/trade_support_rag/documents \
+  --persist-dir data/trade_support_rag/llamaindex_store \
+  --base-url http://localhost:1234/v1 \
+  --embed-model text-embedding-nomic-embed-text-v1.5
+```
+
+### Ключевые аргументы
+
+- `--docs-dir` — папка с markdown.
+- `--persist-dir` — куда сохранить индекс.
+- `--recursive` — искать `.md` в подпапках.
+- `--chunk-size`, `--chunk-overlap` — параметры чанкинга.
+- `--embed-model`, `--base-url`, `--api-key` — embedding endpoint.
+
+## `llamaindex_hybrid_rag.py`
+
+Назначение: инференс по сохраненному индексу с hybrid retrieval и CLI-чатом.
+
+### Режимы запуска
+
+Одиночный вопрос:
+
+```bash
+python scripts/llamaindex_hybrid_rag.py \
+  --index-dir data/trade_support_rag/llamaindex_store \
+  --chat-model local-model \
+  --question "Какие поля обязательны перед эскалацией тикета?"
+```
+
+Интерактивный чат:
+
+```bash
+python scripts/llamaindex_hybrid_rag.py \
+  --index-dir data/trade_support_rag/llamaindex_store \
+  --chat-model local-model \
+  --rerank llm
+```
+
+Без retrieval (для демо-сравнения):
+
+```bash
+python scripts/llamaindex_hybrid_rag.py \
+  --disable-rag \
+  --chat-model local-model
+```
+
+### Ключевые аргументы
+
+- Retrieval:
+- `--top-k`, `--vector-top-k`, `--bm25-top-k`
+- `--vector-weight`, `--bm25-weight`
+- `--bm25-language`
+- Rerank:
+- `--rerank {off,llm}`
+- `--rerank-model` (модель для rerank, по умолчанию = `--chat-model`)
+- `--rerank-candidates`
+- `--rerank-temperature`
+- LLM:
+- `--chat-model`, `--temperature`, `--max-tokens`
+- Demo/no-RAG:
+- `--disable-rag`
+- CLI memory:
+- `--load-session/--no-load-session`
+- `--save-session/--no-save-session`
+- `--memory-turns`
+- `--session-file`
+- `--prompt-history-file`
+
+Интерактивные команды в чате:
+
+- `/exit` — выход
+- `/reset` — очистить память сессии
+- `/save` — сохранить сессию
+
+## Обучение QLoRA
+
+```bash
+source ~/venvs/QLoRA/bin/activate
+
 python scripts/train_qlora_unsloth.py \
   --model-dir base_model \
-  --data-path data/factory_rag/training_dataset.jsonl \
-  --out-dir adapter/qlora_factory_rag \
+  --data-path data/trade_support_rag/training_dataset.jsonl \
+  --out-dir adapter/qlora_support_rag \
   --num-epochs 2 \
   --learning-rate 2e-4 \
   --batch-size 1 \
   --grad-accum 16
 ```
 
-Полезные параметры:
+## Merge, GGUF, Quantize
 
-- `--max-seq-length`
-- `--load-in-4bit / --no-load-in-4bit`
-- `--lora-r`, `--lora-alpha`, `--lora-dropout`
-- `--target-modules` (через запятую)
-- `--dataset-num-proc`
-- `--optim`, `--lr-scheduler-type`
-
-## RAG CLI Bot (LM Studio + FAISS)
-
-Установка зависимости для индекса:
-
-```bash
-pip install -U -r requirements.txt
-```
-
-### 1) Построить индекс по документам
-
-```bash
-python scripts/rag_cli_bot.py \
-  --chat-model ferro_stream \
-  --embed-model text-embedding-nomic-embed-text-v1.5 \
-  index \
-  --docs-dir data/factory_rag/documents \
-  --index-dir data/factory_rag/index
-```
-
-### 2) Запустить CLI-чат
-
-```bash
-python scripts/rag_cli_bot.py \
-  --chat-model ferro_stream \
-  --embed-model text-embedding-nomic-embed-text-v1.5 \
-  chat \
-  --index-dir data/factory_rag/index \
-  --top-k 8
-```
-
-Ответ выводится с блоком источников и ссылками вида `filename.md#Раздел`.
-
-Текущие дефолты в `rag_cli_bot.py`:
-
-- `index --chunk-size 900`
-- `chat/eval/diagnose --top-k 8`
-- `--chat-model ferro_stream`
-- `--embed-model text-embedding-nomic-embed-text-v1.5`
-
-### 3) Запустить оценку качества
-
-```bash
-python scripts/rag_cli_bot.py \
-  --chat-model ferro_stream \
-  --embed-model text-embedding-nomic-embed-text-v1.5 \
-  eval \
-  --index-dir data/factory_rag/index \
-  --eval-path data/factory_rag/training_dataset.jsonl \
-  --max-samples 120 \
-  --report-out data/factory_rag/rag_eval_report.json
-```
-
-Метрики отчёта:
-
-- `hit_at_k` - retrieval попадание expected source в top-k (для known).
-- `refusal_accuracy` - доля корректных отказов на unknown.
-- `groundedness_avg` - средняя доля токенов ответа, пересекающихся с извлечённым контекстом.
-
-## Практический Playbook (Генерация -> Обучение -> Retrieval -> Eval)
-
-### 1) Генерация данных для RAG-SFT
-
-- Рекомендуемая пропорция сэмплов: `known=0.55`, `conflict=0.25`, `unknown=0.20`.
-- Для `dataset-size=1200` и `40` документов ставьте `--qa-per-doc-attempt 20+`, иначе known-часть упрётся в емкость.
-- Для режима только датасета используйте существующую папку документов:
-
-```bash
-python scripts/gen_factory_rag_assets.py \
-  --mode dataset \
-  --dataset-size 1200 \
-  --docs-dir data/factory_rag/documents \
-  --out-dir data/factory_rag \
-  --model local-model \
-  --known-ratio 0.55 \
-  --conflict-ratio 0.25 \
-  --eval-size 150 \
-  --qa-per-doc-attempt 20
-```
-
-### 2) Обучение
-
-- Обучайте на `training_dataset.jsonl`.
-- Следите, чтобы в train были все типы (`known/conflict/unknown`) и источники в ответах.
-
-### 3) Индексация и Retrieval-тюнинг
-
-- Для лучшего retrieval используйте более мелкие чанки:
-
-```bash
-python scripts/rag_cli_bot.py \
-  --embed-model text-embedding-nomic-embed-text-v1.5 \
-  index \
-  --docs-dir data/factory_rag/documents \
-  --index-dir data/factory_rag/index \
-  --chunk-size 900 \
-  --chunk-overlap 180
-```
-
-- Тюньте одновременно `top_k` и `pool_k`:
-  - `top_k` - сколько чанков уходит в prompt.
-  - `pool_k` - сколько кандидатов берется до rerank (`0` = авто `top_k*4`).
-- Рекомендуемый старт: `top_k=8`, `pool_k=40`.
-
-### 4) Диагностика retrieval
-
-```bash
-python scripts/rag_cli_bot.py \
-  --embed-model text-embedding-nomic-embed-text-v1.5 \
-  diagnose \
-  --index-dir data/factory_rag/index \
-  --question "Какая температура термообработки сплава КТ-47?" \
-  --top-k 8 \
-  --pool-k 40
-```
-
-Если в top-k много `Область применения/Термины`, а не `Требования/Параметры`, нужно дальше тюнить chunking и rerank.
-
-### 5) Оценка качества
-
-- Оценивайте на `rag_eval_set.jsonl` (а не на train-файле):
-
-```bash
-python scripts/rag_cli_bot.py \
-  --chat-model ferro_stream \
-  --embed-model text-embedding-nomic-embed-text-v1.5 \
-  eval \
-  --index-dir data/factory_rag/index \
-  --eval-path data/factory_rag/rag_eval_set.jsonl \
-  --max-samples 300 \
-  --top-k 8 \
-  --pool-k 40 \
-  --report-out data/factory_rag/rag_eval_report.json
-```
-
-Интерпретация метрик:
-
-- Низкий `hit_at_k` -> проблема retrieval (индекс/эмбеддинги/chunking/rerank).
-- Низкий `refusal_accuracy` при нормальном `hit_at_k` -> проблема поведения модели (дообучение/промпт).
-- Низкий `groundedness_avg` -> ответы слабо привязаны к контексту, усиливайте known/conflict-сэмплы и формат источников.
-
-## 3) Merge LoRA в базовую модель
+Merge LoRA:
 
 ```bash
 python scripts/merge_lora.py \
   --base-model base_model \
-  --adapter adapter/qlora_factory_rag \
+  --adapter adapter/qlora_support_rag \
   --out-dir merged_model
 ```
 
-Дополнительно:
-
-- `--dtype {float16,bfloat16,float32}`
-- `--device-map`
-- `--trust-remote-code / --no-trust-remote-code`
-- `--safe-serialization / --no-safe-serialization`
-
-## 4) Конвертация в GGUF
+Конвертация в GGUF:
 
 ```bash
 bash scripts/convert_to_gguf.sh \
@@ -323,7 +298,7 @@ bash scripts/convert_to_gguf.sh \
   --outfile gguf/model.f16.gguf
 ```
 
-## 5) Квантизация GGUF
+Квантизация:
 
 ```bash
 bash scripts/quantize.sh \
@@ -332,24 +307,16 @@ bash scripts/quantize.sh \
   --quant Q4_K_M
 ```
 
-## 6) Подключение модели в LM Studio
+## Полезные проверки
 
 ```bash
-mkdir -p ~/.cache/lm-studio/models/my/qlora
-cp gguf/qlora.Q4_K_M.gguf ~/.cache/lm-studio/models/my/qlora/
-```
+source ~/venvs/QLoRA/bin/activate
 
-## Проверка параметров скриптов
-
-```bash
-python scripts/gen_factory_rag_assets.py --help
-python scripts/rag_cli_bot.py --help
+python scripts/gen_support_rag_docs.py --help
+python scripts/build_llamaindex_index.py --help
+python scripts/llamaindex_hybrid_rag.py --help
 python scripts/train_qlora_unsloth.py --help
 python scripts/merge_lora.py --help
 bash scripts/convert_to_gguf.sh --help
 bash scripts/quantize.sh --help
 ```
-
-## Замечания
-
-- `train_qlora_unsloth.py` рассчитан на GPU-окружение с поддержкой `bf16`.

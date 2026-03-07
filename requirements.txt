@@ -4,6 +4,9 @@ numpy
 faiss-cpu
 prompt_toolkit
 rich
+llama-index-core
+llama-index-embeddings-openai
+llama-index-retrievers-bm25
 
 # HF / training / evaluation
 torch
